@@ -71,63 +71,104 @@ def home():
     - Memvisualisasikan hasil clustering dan mengekspor laporan.
     """)
 
+# --- Fungsi untuk Menghasilkan Data Simulasi ---
+def generate_simulated_data(num_rows):
+    """
+    Menghasilkan DataFrame simulasi dengan kolom-kolom standar:
+    Tahun, Provinsi, Kabupaten/Kota, Volume_Sampah, Sampah_Terkelola.
+    """
+    years = np.random.randint(2010, 2025, size=num_rows)
+    
+    provinces = ['Jawa Barat', 'DKI Jakarta', 'Jawa Tengah', 'Jawa Timur', 'Sumatera Utara', 'Banten', 'Bali', 'Riau']
+    cities = ['Bandung', 'Jakarta Selatan', 'Semarang', 'Surabaya', 'Medan', 'Tangerang', 'Denpasar', 'Pekanbaru']
+    
+    provinsi = np.random.choice(provinces, size=num_rows)
+    kabupaten = np.random.choice(cities, size=num_rows)
+    
+    volume_sampah = np.round(np.random.uniform(100.0, 1000.0, size=num_rows), 2)
+    
+    terkelola_ratio = np.random.uniform(0.5, 0.8, size=num_rows)
+    sampah_terkelola = np.round(volume_sampah * terkelola_ratio, 2)
+    
+    data = pd.DataFrame({
+        "Tahun": years,
+        "Provinsi": provinsi,
+        "Kabupaten/Kota": kabupaten,
+        "Volume_Sampah": volume_sampah,
+        "Sampah_Terkelola": sampah_terkelola
+    })
+    
+    return data
+
+# --- Fungsi Utama Input Data yang Dimodifikasi (Hanya 2 Opsi) ---
 def input_data():
     st.header("Input Data Sampah")
-    # Tampilkan dataset asli (sebelum preprocessing) yang tersimpan di session_state jika ada.
-    # Ini memastikan halaman Input Data selalu menampilkan dataset mentah.
+    
+    # Tampilkan dataset saat ini
     if st.session_state.get('raw_data') is not None:
         with st.expander("Dataset Saat Ini (Mentah)", expanded=True):
-            st.write(f"Dataset berisi {st.session_state['raw_data'].shape[0]} baris dan {st.session_state['raw_data'].shape[1]} kolom.")
+            data_shape = st.session_state['raw_data'].shape
+            st.write(f"Dataset berisi **{data_shape[0]} baris** dan **{data_shape[1]} kolom**.")
             st.dataframe(st.session_state['raw_data'])
-    choice = st.radio("Pilih cara mendapatkan data:", ["Unggah Dataset", "Input Manual"])
+
+    st.markdown("---")
     
+    # Pilihan sekarang hanya memiliki 2 opsi
+    choice = st.radio(
+        "Pilih cara mendapatkan data:", 
+        ["Unggah Dataset", "Hasilkan Data Simulasi"]
+    )
+    
+    # --- OPSI 1: Unggah Dataset ---
     if choice == "Unggah Dataset":
+        st.subheader("📁 Unggah Dataset")
         uploaded_file = st.file_uploader("Unggah dataset CSV atau Excel", type=["csv","xlsx"])
+        
         if uploaded_file:
             try:
                 if uploaded_file.name.endswith("csv"):
                     data = pd.read_csv(uploaded_file)
                 else:
-                    data = pd.read_excel(uploaded_file, header=1)
+                    data = pd.read_excel(uploaded_file, header=1) 
 
                 # Bersihkan nama kolom
-                data.columns = data.columns.str.strip()
-                data.columns = data.columns.str.replace(r"[^\w\s]", "", regex=True)
+                data.columns = data.columns.astype(str).str.strip()
+                data.columns = data.columns.str.replace(r"[^a-zA-Z0-9_ ]", "", regex=True) 
                 data.columns = data.columns.str.replace(" ", "_")
-
+                
                 # Simpan dataset mentah
                 st.session_state['raw_data'] = data
 
-                # Tampilkan judul dataset
-                st.subheader("SIPSN - Sistem Informasi Pengelolaan Sampah Nasional")
-                st.write(f"Dataset berisi {data.shape[0]} baris dan {data.shape[1]} kolom.")
+                # Tampilkan hasil
+                st.subheader("✅ Dataset Berhasil Diunggah")
+                st.write(f"Dataset berisi **{data.shape[0]} baris** dan **{data.shape[1]} kolom**.")
                 st.dataframe(data)
             except Exception as e:
-                st.error(f"File yang diunggah tidak valid. Error: {e}")
+                st.error(f"File yang diunggah tidak valid atau formatnya salah. Error: {e}")
 
-    else:
-        st.subheader("Input Data Manual")
-        with st.form("manual_input", clear_on_submit=True):
-            tahun = st.number_input("Tahun", min_value=2000, max_value=2100, value=2025)
-            provinsi = st.text_input("Provinsi")
-            kabupaten = st.text_input("Kabupaten/Kota")
-            volume_sampah = st.number_input("Volume Sampah (ton)", min_value=0.0, step=1.0)
-            sampah_terkelola = st.number_input("Jumlah Sampah Terkelola (ton)", min_value=0.0, step=1.0)
-            submitted = st.form_submit_button("Tambah Data")
-            if submitted:
-                new_row = pd.DataFrame([{
-                    "Tahun": tahun,
-                    "Provinsi": provinsi,
-                    "Kabupaten/Kota": kabupaten,
-                    "Volume_Sampah": volume_sampah,
-                    "Sampah_Terkelola": sampah_terkelola
-                }])
-                if st.session_state.get('raw_data') is None:
-                    st.session_state['raw_data'] = new_row
-                else:
-                    st.session_state['raw_data'] = pd.concat([st.session_state['raw_data'], new_row], ignore_index=True)
-                st.success("Data berhasil ditambahkan!")
-                st.dataframe(st.session_state['raw_data'])
+    # --- OPSI 2: Hasilkan Data Simulasi ---
+    elif choice == "Hasilkan Data Simulasi":
+        st.subheader("🔴 Hasilkan Data Simulasi")
+        
+        # Streamlit Slider untuk jumlah data
+        num_data = st.slider(
+            "Jumlah data yang dihasilkan:",
+            min_value=10,
+            max_value=100,
+            value=50
+        )
+        
+        st.info(f"Dataset simulasi akan berisi **{num_data} baris** dan **5 kolom**.")
+        
+        if st.button("Generate dan Gunakan Data"):
+            simulated_df = generate_simulated_data(num_data)
+            
+            # Simpan DataFrame ke session_state
+            st.session_state['raw_data'] = simulated_df
+            
+            # Tampilkan hasil
+            st.success(f"Berhasil menghasilkan **{num_data}** baris data simulasi!")
+            st.dataframe(st.session_state['raw_data'])
 
 def preprocessing():
     st.header("Preprocessing Data")
