@@ -176,10 +176,23 @@ def preprocessing():
         st.warning("Harap unggah atau input data terlebih dahulu (dataset mentah).")
         return
 
-    data = st.session_state['raw_data'].drop_duplicates()
+    # Salin dataset mentah untuk diolah (tetap simpan raw di session)
+    raw = st.session_state['raw_data']
+    st.subheader("1) Dataset Mentah (Preview)")
+    with st.expander("Tampilkan dataset mentah", expanded=False):
+        st.write(f"Ukuran: {raw.shape[0]} baris x {raw.shape[1]} kolom")
+        st.dataframe(raw.head(10))
 
-    # Normalisasi nama kolom (sama seperti saat unggah file) dan konsolidasi
-    # agar tidak ada duplikat kolom seperti 'Kabupaten/Kota' dan 'KabupatenKota'.
+    # Langkah 1: Hapus duplikat
+    st.subheader("2) Hapus Duplikat")
+    before = raw.shape[0]
+    data = raw.drop_duplicates().copy()
+    after = data.shape[0]
+    dropped = before - after
+    st.write(f"Baris sebelum: **{before}**, setelah drop_duplicates: **{after}**. (Terhapus: **{dropped}**) ")
+
+    # Langkah 2: Normalisasi nama kolom dan tampilkan mapping
+    st.subheader("3) Normalisasi Nama Kolom")
     orig_cols = list(data.columns)
     map_orig_to_new = {}
     for orig in orig_cols:
@@ -188,60 +201,110 @@ def preprocessing():
         nc = nc.replace(" ", "_")
         map_orig_to_new[orig] = nc
 
-    # Untuk setiap target nama baru, gabungkan kolom yang peta ke nama tersebut
+    mapping_df = pd.DataFrame(list(map_orig_to_new.items()), columns=["Original", "Normalized"])
+    st.write("Mapping nama kolom (Original -> Normalized):")
+    st.dataframe(mapping_df)
+
+    # Tampilkan kemungkinan collision (beberapa original -> same normalized)
+    collisions = mapping_df.groupby('Normalized')['Original'].agg(list)
+    collisions = collisions[collisions.apply(lambda x: len(x) > 1)]
+    if not collisions.empty:
+        st.warning("Terdapat beberapa nama kolom yang dikonsolidasikan (collision). Mereka akan digabungkan.")
+        st.write(collisions.to_frame(name='Originals'))
+    else:
+        st.info("Tidak ada collision nama kolom yang terdeteksi.")
+
+    # Langkah 3: Konsolidasi kolom yang map ke nama yang sama
+    st.subheader("4) Konsolidasi Kolom (Rename / Merge)")
     new_names = set(map_orig_to_new.values())
+    merged_info = []
+    dropped_columns_total = []
     for new_name in new_names:
         originals = [o for o, n in map_orig_to_new.items() if n == new_name]
         if len(originals) == 1:
-            # cukup ganti nama kolom
-            data.rename(columns={originals[0]: new_name}, inplace=True)
+            # cukup ganti nama kolom jika berbeda
+            if originals[0] != new_name:
+                data.rename(columns={originals[0]: new_name}, inplace=True)
+                merged_info.append((new_name, "renamed", originals))
         else:
-            # gabungkan dengan mengambil nilai non-null pertama dari kiri ke kanan
+            # gabungkan dengan nilai non-null pertama
+            before_cols = data.columns.tolist()
             data[new_name] = data[originals].bfill(axis=1).iloc[:, 0]
-            # drop semua kolom asli kecuali jika ada yang sudah bernama new_name
-            drop_cols = [o for o in originals if o != new_name]
-            # Jika tidak ada kolom dengan nama new_name di originals, drop semua originals
+            # drop semua kolom asli kecuali jika salah satu sudah bernama new_name
             if new_name not in originals:
-                data.drop(columns=originals, inplace=True)
+                data.drop(columns=originals, inplace=True, errors='ignore')
+                dropped_columns_total.extend(originals)
             else:
-                data.drop(columns=drop_cols, inplace=True)
+                drop_cols = [o for o in originals if o != new_name]
+                data.drop(columns=drop_cols, inplace=True, errors='ignore')
+                dropped_columns_total.extend(drop_cols)
+            merged_info.append((new_name, 'merged', originals))
 
-    # Deteksi kolom numerik (konsolidasi jika ada beberapa variasi nama)
+    if merged_info:
+        st.write("Ringkasan tindakan rename/merge:")
+        st.dataframe(pd.DataFrame(merged_info, columns=['Target', 'Action', 'Sources']))
+    if dropped_columns_total:
+        st.write("Kolom yang dihapus selama konsolidasi:")
+        st.write(dropped_columns_total)
+
+    # Langkah 4: Deteksi kolom numerik penting
+    st.subheader("5) Deteksi Kolom Numerik (Volume & Terkelola)")
     volume_col = [c for c in data.columns if re.search(r'(?i)Timbulan|Volume', c)]
     terkelola_col = [c for c in data.columns if re.search(r'(?i)Terkelola', c)]
+    st.write(f"Kolom yang terdeteksi untuk Volume: {volume_col}")
+    st.write(f"Kolom yang terdeteksi untuk Terkelola: {terkelola_col}")
 
-    # Konsolidasi kolom volume menjadi satu kolom 'Volume_Sampah'
+    # Langkah 5: Konsolidasi kolom numerik menjadi kolom standar
+    st.subheader("6) Konsolidasi Kolom Numerik: Volume_Sampah & Sampah_Terkelola")
+    dropped_numeric = []
     if volume_col:
         if len(volume_col) > 1:
-            data["Volume_Sampah"] = data[volume_col].bfill(axis=1).iloc[:, 0]
+            data['Volume_Sampah'] = data[volume_col].bfill(axis=1).iloc[:, 0]
         else:
-            data["Volume_Sampah"] = data[volume_col[0]]
-        # Hapus kolom sumber (kecuali jika namanya sama dengan target)
+            data['Volume_Sampah'] = data[volume_col[0]]
         for c in list(volume_col):
-            if c != "Volume_Sampah":
-                data.drop(columns=[c], inplace=True, errors='ignore')
+            if c != 'Volume_Sampah':
+                try:
+                    data.drop(columns=[c], inplace=True)
+                    dropped_numeric.append(c)
+                except Exception:
+                    pass
 
-    # Konsolidasi kolom terkelola menjadi satu kolom 'Sampah_Terkelola'
     if terkelola_col:
         if len(terkelola_col) > 1:
-            data["Sampah_Terkelola"] = data[terkelola_col].bfill(axis=1).iloc[:, 0]
+            data['Sampah_Terkelola'] = data[terkelola_col].bfill(axis=1).iloc[:, 0]
         else:
-            data["Sampah_Terkelola"] = data[terkelola_col[0]]
-        # Hapus kolom sumber (kecuali jika namanya sama dengan target)
+            data['Sampah_Terkelola'] = data[terkelola_col[0]]
         for c in list(terkelola_col):
-            if c != "Sampah_Terkelola":
-                data.drop(columns=[c], inplace=True, errors='ignore')
+            if c != 'Sampah_Terkelola':
+                try:
+                    data.drop(columns=[c], inplace=True)
+                    dropped_numeric.append(c)
+                except Exception:
+                    pass
 
-    # Fill missing values
-    for col in ["Volume_Sampah", "Sampah_Terkelola"]:
+    if dropped_numeric:
+        st.write("Kolom numerik sumber yang dihapus:")
+        st.write(dropped_numeric)
+
+    # Langkah 6: Fill missing values untuk fitur numerik
+    st.subheader("7) Penanganan Missing Values")
+    for col in ['Volume_Sampah', 'Sampah_Terkelola']:
         if col in data.columns:
-            data[col].fillna(data[col].mean(), inplace=True)
+            null_before = data[col].isna().sum()
+            mean_val = data[col].mean()
+            data[col].fillna(mean_val, inplace=True)
+            null_after = data[col].isna().sum()
+            st.write(f"Kolom `{col}`: null sebelum = {null_before}, mean = {mean_val:.4f}, null sesudah = {null_after}")
 
-    # Tampilkan dataset dengan judul
-    st.subheader("SIPSN - Dataset Setelah Preprocessing")
-    st.dataframe(data)
+    # Langkah akhir: Tampilkan dataset hasil preprocessing
+    st.subheader("8) Dataset Setelah Preprocessing")
+    st.write(f"Ukuran akhir: {data.shape[0]} baris x {data.shape[1]} kolom")
+    st.dataframe(data.head(20))
+
+    # Simpan hasil preprocessing ke session
     st.session_state['data'] = data
-    st.success("Preprocessing selesai!")
+    st.success("Preprocessing selesai dan hasil disimpan di `st.session_state['data']`.")
 
 def clustering():
     st.header("Clustering Sampah (K-Means)")
