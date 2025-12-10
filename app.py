@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from io import BytesIO
 import re
+import textwrap
 
 # Styling CSS
 st.markdown("""
@@ -99,6 +100,89 @@ def generate_simulated_data(num_rows):
     })
     
     return data
+
+
+def generate_insights_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Menghasilkan insight dalam bentuk DataFrame dua kolom: 'Insight' dan 'Detail'.
+    Cocok untuk ditampilkan sebagai tabel dan diekspor ke Excel/PDF.
+    """
+    rows = []
+    total = len(df)
+    rows.append(("Total baris setelah clustering", f"{total}"))
+
+    # Statistik dasar
+    if 'Volume_Sampah' in df.columns:
+        avg_vol = df['Volume_Sampah'].mean()
+        med_vol = df['Volume_Sampah'].median()
+        rows.append(("Rata-rata Volume Sampah", f"{avg_vol:.2f}"))
+        rows.append(("Median Volume Sampah", f"{med_vol:.2f}"))
+
+    if 'Sampah_Terkelola' in df.columns and 'Volume_Sampah' in df.columns:
+        avg_terkelola = df['Sampah_Terkelola'].mean()
+        rows.append(("Rata-rata Sampah Terkelola", f"{avg_terkelola:.2f}"))
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratios = (df['Sampah_Terkelola'] / df['Volume_Sampah']).replace([np.inf, -np.inf], np.nan).fillna(0)
+        avg_ratio = ratios.mean()
+        rows.append(("Rata-rata proporsi sampah terkelola", f"{avg_ratio*100:.1f}%"))
+
+    # Cluster summary
+    if 'Label_Cluster' in df.columns:
+        counts = df['Label_Cluster'].value_counts()
+        top = counts.idxmax()
+        top_pct = counts.max() / total * 100 if total > 0 else 0
+        rows.append(("Cluster terbanyak", f"{top} ({top_pct:.1f}%)"))
+
+        grp_vol = df.groupby('Label_Cluster')['Volume_Sampah'].mean()
+        high_vol_cluster = grp_vol.idxmax()
+        low_vol_cluster = grp_vol.idxmin()
+        rows.append(("Cluster rata-rata Volume tertinggi", f"{high_vol_cluster} ({grp_vol.max():.2f})"))
+        rows.append(("Cluster rata-rata Volume terendah", f"{low_vol_cluster} ({grp_vol.min():.2f})"))
+
+        grp_ratio = (df.assign(_ratio=(df['Sampah_Terkelola'] / df['Volume_Sampah']).replace([np.inf, -np.inf], np.nan).fillna(0))
+                     .groupby('Label_Cluster')['_ratio'].mean())
+        worst_managed = grp_ratio.idxmin()
+        rows.append(("Cluster proporsi terkelola terendah", f"{worst_managed} ({grp_ratio.min()*100:.1f}%)"))
+
+    # Tren sederhana jika tersedia kolom Tahun
+    if 'Tahun' in df.columns:
+        try:
+            yearly = df.groupby('Tahun')['Volume_Sampah'].mean().sort_index()
+            if len(yearly) >= 2:
+                coeffs = np.polyfit(yearly.index.astype(int), yearly.values, 1)
+                slope = coeffs[0]
+                trend = 'meningkat' if slope > 0 else ('menurun' if slope < 0 else 'stabil')
+                rows.append(("Tren rata-rata Volume per Tahun", f"{trend} (slope={slope:.3f})"))
+        except Exception:
+            pass
+
+    # (Rekomendasi dibuat terpisah oleh fungsi generate_recommendations_list)
+
+    insight_df = pd.DataFrame(rows, columns=["Insight", "Detail"])
+    return insight_df
+
+
+def generate_recommendations_list(df: pd.DataFrame) -> list:
+    """
+    Menghasilkan daftar rekomendasi (list of strings) berdasarkan DataFrame.
+    Rekomendasi ditampilkan terpisah dari tabel insight.
+    """
+    recs = []
+    try:
+        # rekomendasi umum
+        recs.append("Fokus pada cluster dengan proporsi sampah terkelola rendah untuk intervensi.")
+        recs.append("Periksa area dalam cluster dengan volume tinggi untuk peningkatan kapasitas pengelolaan.")
+
+        # rekomendasi tambahan berdasarkan per-cluster ratio
+        if 'Label_Cluster' in df.columns and 'Volume_Sampah' in df.columns and 'Sampah_Terkelola' in df.columns:
+            grp = (df.assign(_ratio=(df['Sampah_Terkelola'] / df['Volume_Sampah']).replace([np.inf, -np.inf], np.nan).fillna(0))
+                   .groupby('Label_Cluster')['_ratio'].mean())
+            low = grp.nsmallest(2).index.tolist()
+            if low:
+                recs.append(f"Pertimbangkan intervensi prioritas pada cluster: {', '.join(map(str, low))} karena proporsi terkelola rendah.")
+    except Exception:
+        pass
+    return recs
 
 # --- Fungsi Utama Input Data yang Dimodifikasi (Hanya 2 Opsi) ---
 def input_data():
@@ -373,10 +457,29 @@ def clustering():
     st.download_button("Unduh CSV", data=csv, file_name='hasil_cluster.csv', mime='text/csv')
 
     towrite = BytesIO()
-    data.to_excel(towrite, index=False, engine='openpyxl')
-    towrite.seek(0)
-    st.download_button("Unduh Excel", data=towrite, file_name="hasil_cluster.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    try:
+        with pd.ExcelWriter(towrite, engine='openpyxl') as writer:
+            data.to_excel(writer, sheet_name='Hasil_Cluster', index=False)
+            try:
+                insight_df = generate_insights_df(data)
+                insight_df.to_excel(writer, sheet_name='Insight', index=False)
+                # write recommendations sheet as well
+                recs = generate_recommendations_list(data)
+                rec_df = pd.DataFrame({'Rekomendasi': recs})
+                rec_df.to_excel(writer, sheet_name='Rekomendasi', index=False)
+            except Exception:
+                # jika gagal membuat sheet insight jangan gagalkan seluruh proses
+                pass
+        towrite.seek(0)
+        st.download_button("Unduh Excel", data=towrite, file_name="hasil_cluster.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    except Exception:
+        # fallback sederhana bila terjadi error saat menulis multi-sheet
+        towrite = BytesIO()
+        data.to_excel(towrite, index=False, engine='openpyxl')
+        towrite.seek(0)
+        st.download_button("Unduh Excel (fallback)", data=towrite, file_name="hasil_cluster.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     st.session_state['data'] = data
 
@@ -444,11 +547,81 @@ def visualisasi():
     st.pyplot(fig4)
     figs.append(fig4)
 
+    # Tampilkan Insight dalam bentuk tabel (DataFrame)
+    try:
+        insight_df = generate_insights_df(data)
+        with st.expander("🔎 Insight (Kesimpulan) dari Visualisasi & Tabel", expanded=True):
+            st.table(insight_df)
+
+            # Tombol unduh untuk insight sebagai teks
+            st.download_button(
+                label="Unduh Insight (TXT)",
+                data=insight_df.to_csv(index=False, sep=';'),
+                file_name="insight_summary.txt",
+                mime="text/plain"
+            )
+
+            # Tombol unduh insight sebagai Excel (Insight + Rekomendasi pada sheet terpisah)
+            excel_buf = BytesIO()
+            try:
+                recs = generate_recommendations_list(data)
+                rec_df = pd.DataFrame({'Rekomendasi': recs})
+                with pd.ExcelWriter(excel_buf, engine='openpyxl') as writer:
+                    insight_df.to_excel(writer, sheet_name='Insight', index=False)
+                    rec_df.to_excel(writer, sheet_name='Rekomendasi', index=False)
+                excel_buf.seek(0)
+                st.download_button(
+                    label="Unduh Insight (Excel)",
+                    data=excel_buf,
+                    file_name="insight_summary.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            except Exception:
+                pass
+
+            # Tampilkan rekomendasi di UI (di luar tabel)
+            st.markdown("**Rekomendasi:**")
+            for r in recs:
+                st.markdown(f"- {r}")
+    except Exception as e:
+        st.warning(f"Gagal membuat insight otomatis: {e}")
+
     # Unduh semua visualisasi sebagai satu PDF multi-halaman
     st.subheader("Unduh Semua Visualisasi")
     # Buat buffer PDF sekarang dan tampilkan satu tombol unduh langsung
     from matplotlib.backends.backend_pdf import PdfPages
     pdf_buffer = BytesIO()
+
+    # Sertakan insight sebagai halaman terakhir PDF (tabel)
+    try:
+        insight_df_for_pdf = generate_insights_df(data)
+        fig_insight = plt.figure(figsize=(8.27, 11.69))  # A4 portrait
+        ax_ins = fig_insight.add_subplot(111)
+        ax_ins.axis('off')
+        # buat tabel matplotlib
+        tbl = ax_ins.table(cellText=insight_df_for_pdf.values, colLabels=insight_df_for_pdf.columns, loc='center')
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(10)
+        tbl.scale(1, 1.5)
+        figs.append(fig_insight)
+        # tambahkan halaman rekomendasi sebagai teks (terpisah)
+        try:
+            recs_for_pdf = generate_recommendations_list(data)
+            fig_rec = plt.figure(figsize=(8.27, 11.69))
+            fig_rec.clf()
+            fig_rec.text(0.02, 0.98, 'Rekomendasi:', va='top', fontsize=12, weight='bold')
+            y = 0.94
+            for r in recs_for_pdf:
+                fig_rec.text(0.02, y, f"- {r}", va='top', fontsize=10)
+                y -= 0.04
+            plt.axis('off')
+            figs.append(fig_rec)
+        except Exception:
+            pass
+    except Exception:
+        # Jika gagal membuat halaman insight, lanjutkan tanpa insight
+        pass
+
     with PdfPages(pdf_buffer) as pdf:
         for fig in figs:
             pdf.savefig(fig, bbox_inches='tight')
